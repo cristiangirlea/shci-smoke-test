@@ -1,0 +1,14 @@
+name: smoke
+
+# Throwaway repository for self-hosted-ci's done-when (P5a): a job must run on a runner set brought
+# up from a fresh clone of self-hosted-ci. Delete this repository after the test.
+on: [push, workflow_dispatch]
+
+jobs:
+  smoke:
+    runs-on: lab-shci-smoke-test
+    steps:
+      - run: |
+          echo "runner: $RUNNER_NAME"
+          uname -a
+          docker version --format 'docker {{.Server.Version}}'
