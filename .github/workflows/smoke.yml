@@ -1,8 +1,9 @@
 name: smoke
 
-# Throwaway repository for self-hosted-ci's done-when (P5a): a job must run on a runner set brought
-# up from a fresh clone of self-hosted-ci. Delete this repository after the test.
-on: [push, workflow_dispatch]
+# The smoke target for self-hosted-ci releases: `make smoke TAG=<tag>` in infra brings up a runner set
+# for this repository from a fresh clone of that tag, triggers this workflow, waits for it, and
+# removes the runner set again. Between tests no runner exists, so a push here just stays queued.
+on: [workflow_dispatch]
 
 jobs:
   smoke:
