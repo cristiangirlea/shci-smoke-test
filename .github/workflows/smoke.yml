@@ -17,6 +17,12 @@ jobs:
           echo "runner: $RUNNER_NAME"
           uname -a
           docker version --format 'docker {{.Server.Version}}'
+          # curl answers any *.localhost name with loopback itself (RFC 6761) and never asks DNS,
+          # so it is pointed at the address the cluster's resolver gives (Docker and BuildKit ask).
+          ip=$(getent ahostsv4 registry.localhost | awk 'NR==1 {print $1}')
+          test -n "$ip" || { echo "registry.localhost does not resolve in this pod"; exit 1; }
+          echo "registry.localhost is $ip"
+          echo "CURL_RESOLVE=registry.localhost:5000:$ip" >> "$GITHUB_ENV"
 
       # Docker's own builder: build, push, then pull back by the digest the registry reports. The
       # image is FROM scratch, so nothing comes from Docker Hub; each run adds one tiny tag.
@@ -27,7 +33,7 @@ jobs:
           tag="$REGISTRY/shci-smoke:run-$GITHUB_RUN_ID"
           docker build -t "$tag" ctx
           docker push "$tag"
-          digest=$(curl -fsSI -H "Accept: $ACCEPT" "http://$REGISTRY/v2/shci-smoke/manifests/run-$GITHUB_RUN_ID" | tr -d '\r' | sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest: //p')
+          digest=$(curl -fsSI --resolve "$CURL_RESOLVE" -H "Accept: $ACCEPT" "http://$REGISTRY/v2/shci-smoke/manifests/run-$GITHUB_RUN_ID" | tr -d '\r' | sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest: //p')
           test -n "$digest" || { echo "the registry does not have $tag"; exit 1; }
           docker rmi "$tag"
           docker pull "$REGISTRY/shci-smoke@$digest"
@@ -44,4 +50,4 @@ jobs:
         run: |
           printf 'FROM %s\nCOPY run /run2\n' "$REGISTRY/shci-smoke:run-$GITHUB_RUN_ID" > ctx/Dockerfile.buildx
           docker buildx build --push -f ctx/Dockerfile.buildx -t "$REGISTRY/shci-smoke:run-$GITHUB_RUN_ID-buildx" ctx
-          curl -fsSI -H "Accept: $ACCEPT" "http://$REGISTRY/v2/shci-smoke/manifests/run-$GITHUB_RUN_ID-buildx" | tr -d '\r' | grep -i '^docker-content-digest:'
+          curl -fsSI --resolve "$CURL_RESOLVE" -H "Accept: $ACCEPT" "http://$REGISTRY/v2/shci-smoke/manifests/run-$GITHUB_RUN_ID-buildx" | tr -d '\r' | grep -i '^docker-content-digest:'
