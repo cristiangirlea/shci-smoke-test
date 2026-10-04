@@ -5,11 +5,60 @@ name: smoke
 # removes the runner set again. Between tests no runner exists, so a push here just stays queued.
 on: [workflow_dispatch]
 
+permissions: {}
+
+defaults:
+  run:
+    shell: bash # adds pipefail to GitHub's default `bash -e`
+
 jobs:
   smoke:
     runs-on: lab-shci-smoke-test
+    env:
+      # The cluster's registry, plain HTTP, the same name the nodes pull by.
+      REGISTRY: registry.localhost:5000
+      ACCEPT: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json
     steps:
       - run: |
           echo "runner: $RUNNER_NAME"
           uname -a
           docker version --format 'docker {{.Server.Version}}'
+          # curl answers any *.localhost name with loopback itself (RFC 6761) and never asks DNS,
+          # so it is pointed at the address the cluster's resolver gives (Docker and BuildKit ask).
+          ip=$(getent ahostsv4 registry.localhost | awk 'NR==1 {print $1}')
+          test -n "$ip" || { echo "registry.localhost does not resolve in this pod"; exit 1; }
+          echo "registry.localhost is $ip"
+          echo "CURL_RESOLVE=registry.localhost:5000:$ip" >> "$GITHUB_ENV"
+          # A re-run gets new tags, so no check can pass on an earlier attempt's push.
+          echo "SMOKE_TAG=run-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+
+      # Docker's own builder: build, push, then pull back by the digest the registry reports (the
+      # manifest and config come from the registry; the layer stays cached locally, BuildKit below
+      # fetches it). The image is FROM scratch, so this step needs nothing from Docker Hub.
+      - name: push with docker build
+        run: |
+          mkdir ctx && echo "$SMOKE_TAG" > ctx/run
+          printf 'FROM scratch\nCOPY run /run\n' > ctx/Dockerfile
+          ref="$REGISTRY/shci-smoke:$SMOKE_TAG"
+          docker build -t "$ref" ctx
+          docker push "$ref"
+          digest=$(curl -fsSI --resolve "$CURL_RESOLVE" -H "Accept: $ACCEPT" "http://$REGISTRY/v2/shci-smoke/manifests/$SMOKE_TAG" | tr -d '\r' | sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest: //p')
+          test -n "$digest" || { echo "the registry does not have $ref"; exit 1; }
+          docker rmi "$ref"
+          docker pull "$REGISTRY/shci-smoke@$digest"
+          echo "pushed and pulled back $ref ($digest)"
+
+      # A docker-container builder (setup-buildx-action's default) runs its own BuildKit, which needs
+      # the registry declared plain HTTP, exactly as self-hosted-ci's README shows. BuildKit's image
+      # runs privileged, so it is pinned by digest (it comes from Docker Hub).
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+          buildkitd-config-inline: |
+            [registry."registry.localhost:5000"]
+              http = true
+      - name: build FROM the registry and push through BuildKit
+        run: |
+          printf 'FROM %s\nCOPY run /run2\n' "$REGISTRY/shci-smoke:$SMOKE_TAG" > ctx/Dockerfile.buildx
+          docker buildx build --push -f ctx/Dockerfile.buildx -t "$REGISTRY/shci-smoke:$SMOKE_TAG-buildx" ctx
+          curl -fsSI --resolve "$CURL_RESOLVE" -H "Accept: $ACCEPT" "http://$REGISTRY/v2/shci-smoke/manifests/$SMOKE_TAG-buildx" | tr -d '\r' | grep -i '^docker-content-digest:'
